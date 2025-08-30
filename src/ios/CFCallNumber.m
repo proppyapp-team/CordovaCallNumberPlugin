@@ -4,36 +4,100 @@
 @implementation CFCallNumber
 
 + (BOOL)available {
-    return [[UIApplication sharedApplication] canOpenURL:[NSURL URLWithString:@"tel://"]];
+    // Fixed: Use consistent "tel:" scheme (not "tel://")
+    return [[UIApplication sharedApplication] canOpenURL:[NSURL URLWithString:@"tel:"]];
 }
 
 - (void) callNumber:(CDVInvokedUrlCommand*)command {
     
     [self.commandDelegate runInBackground:^{
         
-        __block CDVPluginResult* pluginResult = nil;
         NSString* number = [command.arguments objectAtIndex:0];
-        number = [number stringByAddingPercentEscapesUsingEncoding:NSUTF8StringEncoding];
         
-        if(![number hasPrefix:@"tel:"]){
-            number =  [NSString stringWithFormat:@"tel:%@", number];
+        // Validate input
+        if (!number || [number length] == 0) {
+            CDVPluginResult* pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR 
+                                                              messageAsString:@"InvalidPhoneNumber"];
+            [self.commandDelegate sendPluginResult:pluginResult callbackId:command.callbackId];
+            return;
+        }
+        
+        // Use modern percent encoding for production reliability
+        NSString* encodedNumber;
+        if (@available(iOS 9.0, *)) {
+            // Use URLFragmentAllowedCharacterSet for phone numbers - more restrictive and reliable
+            NSCharacterSet *allowedChars = [NSCharacterSet characterSetWithCharactersInString:@"0123456789+*#"];
+            encodedNumber = [number stringByAddingPercentEncodingWithAllowedCharacters:allowedChars];
+        } else {
+            #pragma clang diagnostic push
+            #pragma clang diagnostic ignored "-Wdeprecated-declarations"
+            encodedNumber = [number stringByAddingPercentEscapesUsingEncoding:NSUTF8StringEncoding];
+            #pragma clang diagnostic pop
+        }
+        
+        if (!encodedNumber) {
+            CDVPluginResult* pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR 
+                                                              messageAsString:@"EncodingError"];
+            [self.commandDelegate sendPluginResult:pluginResult callbackId:command.callbackId];
+            return;
+        }
+        
+        if(![encodedNumber hasPrefix:@"tel:"]){
+            encodedNumber = [NSString stringWithFormat:@"tel:%@", encodedNumber];
         }
 
-        // run in mainthread as below 
+        // CRITICAL: All UI operations and plugin results must be on main thread
         dispatch_async(dispatch_get_main_queue(), ^{
+            
             if(![CFCallNumber available]) {
-                pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR messageAsString:@"NoFeatureCallSupported"];
+                CDVPluginResult* pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR 
+                                                                  messageAsString:@"NoFeatureCallSupported"];
+                [self.commandDelegate sendPluginResult:pluginResult callbackId:command.callbackId];
+                return;
             }
-            else if(![[UIApplication sharedApplication] openURL:[NSURL URLWithString:number]]) {
-                // missing phone number
-                pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR messageAsString:@"CouldNotCallPhoneNumber"];
+            
+            NSURL* url = [NSURL URLWithString:encodedNumber];
+            if (!url) {
+                CDVPluginResult* pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR 
+                                                                  messageAsString:@"InvalidURL"];
+                [self.commandDelegate sendPluginResult:pluginResult callbackId:command.callbackId];
+                return;
+            }
+            
+            // Production-safe URL opening
+            if (@available(iOS 10.0, *)) {
+                [[UIApplication sharedApplication] openURL:url 
+                                                   options:@{} 
+                                         completionHandler:^(BOOL success) {
+                    // Ensure plugin result is sent on main thread
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        CDVPluginResult* result;
+                        if (success) {
+                            result = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK];
+                        } else {
+                            result = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR 
+                                                       messageAsString:@"CouldNotCallPhoneNumber"];
+                        }
+                        [self.commandDelegate sendPluginResult:result callbackId:command.callbackId];
+                    });
+                }];
             } else {
-                pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK];
+                // Fallback for iOS < 10.0
+                #pragma clang diagnostic push
+                #pragma clang diagnostic ignored "-Wdeprecated-declarations"
+                BOOL success = [[UIApplication sharedApplication] openURL:url];
+                #pragma clang diagnostic pop
+                
+                CDVPluginResult* pluginResult;
+                if (success) {
+                    pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK];
+                } else {
+                    pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR 
+                                                     messageAsString:@"CouldNotCallPhoneNumber"];
+                }
+                [self.commandDelegate sendPluginResult:pluginResult callbackId:command.callbackId];
             }
         });
-        // return result
-        [self.commandDelegate sendPluginResult:pluginResult callbackId:command.callbackId];
-        
     }];
 }
 
